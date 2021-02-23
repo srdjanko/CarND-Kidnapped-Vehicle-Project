@@ -64,6 +64,7 @@ int main() {
         if (event == "telemetry") {
           // j[1] is the data JSON object
           if (!pf.initialized()) {
+            // SrKo: If the data is noised from the simulator why it has to be noised again?
             // Sense noisy position data from the simulator
             double sense_x = std::stod(j[1]["sense_x"].get<string>());
             double sense_y = std::stod(j[1]["sense_y"].get<string>());
@@ -76,6 +77,8 @@ int main() {
             double previous_velocity = std::stod(j[1]["previous_velocity"].get<string>());
             double previous_yawrate = std::stod(j[1]["previous_yawrate"].get<string>());
 
+            // SrKo: The same std is used for velocity and yaw_rate measurements, is
+            // this intentional? Since it does not make much sense :)
             pf.prediction(delta_t, sigma_pos, previous_velocity, previous_yawrate);
           }
 

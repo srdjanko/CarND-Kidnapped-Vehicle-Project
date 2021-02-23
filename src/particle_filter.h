@@ -45,6 +45,8 @@ class ParticleFilter {
    */
   void init(double x, double y, double theta, double std[]);
 
+  // SrKo: Why is std data the same as for the init function (x, y and yaw)
+  // when measured values here are velocity and yaw_rate?
   /**
    * prediction Predicts the state for the next time step
    *   using the process model.
