@@ -15,6 +15,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <set>
 
 #include "helper_functions.h"
 
@@ -25,7 +26,9 @@ using std::uniform_real_distribution;
 
 namespace
 {
-  const std::default_random_engine gen;
+  std::default_random_engine gen;
+
+  std::set<int> particle_ids;
 
   double multiv_prob(double sig_x, double sig_y, double x_obs, double y_obs,
                      double mu_x, double mu_y) {
@@ -63,8 +66,12 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
 
   for (size_t i = 0; i < num_particles; ++i)
   {
-    particles.push_back(Particle { (int) i, dist_x(gen) , dist_y(gen), dist_theta(gen), 1 });
+    // Add exact position particles
+//    particles.push_back(Particle { (int) i + 1, x, y, theta, 1 });
+    particles.push_back(Particle { (int) i + 1, dist_x(gen) , dist_y(gen), dist_theta(gen), 1 });
   }
+
+  is_initialized = true;
 }
 
 void ParticleFilter::prediction(double delta_t, double std_pos[], 
@@ -84,10 +91,10 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
   for(auto & p : particles)
   {
     const auto v_measured = dist_v(gen);
-    const auto delta_theta_measured = dist_yaw_rate(gen);
+    const auto delta_theta_measured = dist_yaw_rate(gen); // yaw_rate; //
 
     // Movement prediction model
-    if(delta_t == 0)
+    if(abs(delta_t) < 0.0001)
     {
       p.x = p.x + v_measured * delta_t * cos(p.theta);
       p.y = p.y + v_measured * delta_t * sin(p.theta);
@@ -188,7 +195,7 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
       p.sense_x.push_back(sense_x);
       p.sense_y.push_back(sense_y);
 
-      // Update weights
+      // Update weightsweight = {double} 1.0302681898920017e-08
       p.weight *= multiv_prob(std_landmark[0], std_landmark[1], sense_x, sense_y, l_x, l_y);
     }
 
@@ -210,6 +217,8 @@ void ParticleFilter::resample() {
    *   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
    */
 
+  // Problem: Only a few or just one particle survives the resample process
+
   uniform_real_distribution<double> u_dist;
   std::vector<Particle> new_particles;
 
@@ -226,16 +235,29 @@ void ParticleFilter::resample() {
       else
       {
         new_particles.push_back(p);
+        break;
       }
     }
 
     // In unlikely case that beta is larger than the sum of all weights, which may occur
     // due to rounding errors.
-    if(new_particles.size() != i)
+    if(new_particles.size() != i + 1)
     {
       new_particles.push_back(particles.back());
     }
   }
+
+  // Debug: show number of different particles
+  particle_ids.clear();
+  for(const Particle &p: new_particles)
+  {
+    if(particle_ids.find(p.id) == particle_ids.end())
+    {
+      particle_ids.insert(p.id);
+    }
+  }
+
+  std::cout << "Remaining unique particles: " << particle_ids.size() << std::endl;
 
   particles = new_particles;
 }
