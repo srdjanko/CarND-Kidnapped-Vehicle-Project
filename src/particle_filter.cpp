@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include "kalman_filter.h"
 
 #include "helper_functions.h"
 
@@ -24,11 +25,50 @@ using std::vector;
 using std::normal_distribution;
 using std::uniform_real_distribution;
 
+using MatrixXd = Eigen::MatrixXd;
+using VectorXd = Eigen::VectorXd;
+
 namespace
 {
   std::default_random_engine gen;
 
-  std::set<int> particle_ids;
+//  vector<LandmarkObs> tracked_obs;
+  KalmanFilter kf;
+  VectorXd f_dt(3);
+  MatrixXd Fj_dt(3, 3);
+
+  // Previous best
+  Particle best_p;
+
+  int initialize_kl()
+  {
+    // state vector
+    VectorXd x(3);
+    x << 0, 0, 0;
+
+    // state covariance matrix P
+    MatrixXd P(3, 3);
+    P << 10, 0, 0,
+        0, 10, 0,
+        0, 0, 100;
+
+    MatrixXd H(2, 3);
+    H << 1, 0, 0,
+        0, 1, 0;
+
+    // measurement covariance matrix - laser
+    MatrixXd R_laser(2, 2);
+    R_laser << 0.3, 0,
+        0, 0.3;
+
+    // process covariance matrix
+    MatrixXd Q(3, 3);
+    Q << 0.1, 0, 0,
+        0, 0.1, 0,
+        0, 0, 0.01;
+
+    kf.Init(x, P, MatrixXd(0, 0), H, R_laser, Q);
+  }
 
   double multiv_prob(double sig_x, double sig_y, double x_obs, double y_obs,
                      double mu_x, double mu_y)
@@ -60,7 +100,7 @@ void ParticleFilter::init(double x, double y, double theta, double std[])
    * NOTE: Consult particle_filter.h for more information about this method 
    *   (and others in this file).
    */
-  num_particles = 6000;  // TODO: Set the number of particles
+  num_particles = 450;  // TODO: Set the number of particles
 
   normal_distribution<double> dist_x(x, std[0]);
   normal_distribution<double> dist_y(y, std[1]);
@@ -71,6 +111,9 @@ void ParticleFilter::init(double x, double y, double theta, double std[])
     // Add exact position particles
     particles.push_back(Particle{(int) i + 1, dist_x(gen), dist_y(gen), dist_theta(gen), 1});
   }
+
+  // Initialize Kalman filter states
+  kf.x_ << dist_x(gen), dist_y(gen), dist_theta(gen);
 
   is_initialized = true;
 }
@@ -98,13 +141,27 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
       p.x += velocity * delta_t * cos(p.theta);
       p.y += velocity * delta_t * sin(p.theta);
 //      p.theta += yaw_rate * delta_t;
-    }
-    else
+    } else
     {
       p.x += velocity * (sin(p.theta + yaw_rate * delta_t) - sin(p.theta)) / yaw_rate;
       p.y += velocity * (cos(p.theta) - cos(p.theta + yaw_rate * delta_t)) / yaw_rate;
       p.theta += yaw_rate * delta_t;
     }
+
+    // Update KF
+    const auto theta = kf.x_[2];
+    f_dt << velocity * cos(theta),
+        velocity * sin(theta),
+        yaw_rate;
+
+    f_dt *= delta_t;
+
+    Fj_dt << 0, 0, -velocity * sin(theta),
+        0, 0, velocity * cos(theta),
+        0, 0, 0;
+
+    Fj_dt *= delta_t;
+    kf.PredictEKF(f_dt, Fj_dt);
 
     // SrKo: Why do we add (x,y,z) noise when it is (velocity, yaw_rate) that is measured?
     p.x += dist_x(gen);
@@ -157,9 +214,55 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
    *   and the following is a good resource for the actual equation to implement
    *   (look at equation 3.33) http://planning.cs.uiuc.edu/node99.html
    */
-  if (map_landmarks.landmark_list.size() == 0)
+
+  vector<LandmarkObs> predicted_observations;
+  vector<LandmarkObs> transformed_observations;
+
+  // Use Kalman filter to filter out the noise from the landmark measurements
+  // Kalman filter will be used for the previous best values particle
+  const auto &best = std::max(particles.begin(), particles.end(), [](Particle &p)
+  { return p.weight; });
+
+  // Associate observations with previous best prediction
+  for (const auto &o: observations)
   {
-    throw "Landmark map can not be empty!";
+    const auto sense_x = best->x + cos(best->theta) * o.x - sin(best->theta) * o.y;
+    const auto sense_y = best->y + sin(best->theta) * o.x + cos(best->theta) * o.y;
+
+    transformed_observations.push_back(LandmarkObs{0, sense_x, sense_y});
+  }
+
+  // We want to make sure that previous observations, linked to the same landmark
+  // are not too distance from the current observations
+  vector<LandmarkObs> previous_observations;
+
+  for (size_t i; i < best->associations.size(); ++i)
+  {
+    previous_observations.push_back(LandmarkObs{best->associations[i], best->sense_x[i], best->sense_y[i]});
+  }
+
+  dataAssociation(previous_observations, transformed_observations);
+
+  // If previous and current observations are close, update Kalman Filter
+  for (auto &to: transformed_observations)
+  {
+    // If we already track a landmark from previous step and it is in the vicinity of
+    // new position, then we have a candidate to update KF
+
+    // Find previous landmark
+    const auto &it_tracked_to = std::find_if(previous_observations.begin(), previous_observations.end(),
+                                             [&to](LandmarkObs &o)
+                                             { return to.id == o.id; });
+
+    if (dist(it_tracked_to->x, it_tracked_to->y, to.x, to.y) > 2.0)
+    {
+      continue;
+    }
+
+    // Update KF with this measurement
+    VectorXd z(2);
+    z << to.x, to.y;
+    kf.Update(z);
   }
 
   for (Particle &p: particles)
@@ -170,8 +273,8 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
     p.sense_y.clear();
     p.weight = 1;
 
-    vector<LandmarkObs> predicted_observations;
-    vector<LandmarkObs> transformed_observations;
+    transformed_observations.clear();
+    predicted_observations.clear();
 
     // Select observations that are within sensor range of the particle
     for (const auto &l: map_landmarks.landmark_list)
