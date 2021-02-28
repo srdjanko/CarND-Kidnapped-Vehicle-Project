@@ -48,27 +48,30 @@ namespace
 
     // state covariance matrix P
     MatrixXd P(3, 3);
-    P << 10, 0, 0,
-        0, 10, 0,
-        0, 0, 100;
+    P << 1, 0, 0,
+          0, 1, 0,
+          0, 0, 10;
 
     MatrixXd H(2, 3);
     H << 1, 0, 0,
-        0, 1, 0;
+            0, 1, 0;
 
     // measurement covariance matrix - laser
     MatrixXd R_laser(2, 2);
     R_laser << 0.3, 0,
-        0, 0.3;
+              0, 0.3;
 
     // process covariance matrix
     MatrixXd Q(3, 3);
     Q << 0.1, 0, 0,
-        0, 0.1, 0,
-        0, 0, 0.01;
+          0, 0.1, 0,
+          0, 0, 0.01;
+//    Q *= 0.1;
 
     kf.Init(x, P, MatrixXd(0, 0), H, R_laser, Q);
   }
+
+  bool success = initialize_kl();
 
   double multiv_prob(double sig_x, double sig_y, double x_obs, double y_obs,
                      double mu_x, double mu_y)
@@ -148,26 +151,28 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
       p.theta += yaw_rate * delta_t;
     }
 
-    // Update KF
-    const auto theta = kf.x_[2];
-    f_dt << velocity * cos(theta),
-        velocity * sin(theta),
-        yaw_rate;
-
-    f_dt *= delta_t;
-
-    Fj_dt << 0, 0, -velocity * sin(theta),
-        0, 0, velocity * cos(theta),
-        0, 0, 0;
-
-    Fj_dt *= delta_t;
-    kf.PredictEKF(f_dt, Fj_dt);
-
     // SrKo: Why do we add (x,y,z) noise when it is (velocity, yaw_rate) that is measured?
     p.x += dist_x(gen);
     p.y += dist_y(gen);
     p.theta += dist_theta(gen);
   }
+
+  // Update KF
+  const auto theta = kf.x_[2];
+  f_dt << velocity * cos(theta),
+          velocity * sin(theta),
+          yaw_rate;
+
+  f_dt *= delta_t;
+
+  Fj_dt << 0, 0, -velocity * sin(theta),
+          0, 0, velocity * cos(theta),
+          0, 0, 0;
+
+  Fj_dt *= delta_t;
+
+  kf.PredictEKF(f_dt, Fj_dt);
+
 }
 
 void ParticleFilter::dataAssociation(vector<LandmarkObs> &predicted,
@@ -217,52 +222,65 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 
   vector<LandmarkObs> predicted_observations;
   vector<LandmarkObs> transformed_observations;
+  vector<LandmarkObs> filtered_observations;
 
   // Use Kalman filter to filter out the noise from the landmark measurements
   // Kalman filter will be used for the previous best values particle
-  const auto &best = std::max(particles.begin(), particles.end(), [](Particle &p)
-  { return p.weight; });
+  const auto &best = std::max_element(particles.begin(), particles.end(), [](const Particle &p1, const Particle &p2)
+  { return p1.weight < p2.weight; });
 
-  // Associate observations with previous best prediction
-  for (const auto &o: observations)
+  if(best->associations.size() > 0)
   {
-    const auto sense_x = best->x + cos(best->theta) * o.x - sin(best->theta) * o.y;
-    const auto sense_y = best->y + sin(best->theta) * o.x + cos(best->theta) * o.y;
+    // Find the closest observation
+    const auto &closest_obs = std::min_element(observations.begin(), observations.end(),
+                                               [](const LandmarkObs o1, const LandmarkObs &o2)
+                                               { return dist(0, 0, o1.x, o1.y) < dist(0, 0, o2.x, o2.y); });
 
-    transformed_observations.push_back(LandmarkObs{0, sense_x, sense_y});
-  }
+    // Find closest landmark to the closest observation, from the ones previously discovered by the best particle
+    auto min_dist = std::numeric_limits<double>::max();
+    Map::single_landmark_s clossest_landmark;
 
-  // We want to make sure that previous observations, linked to the same landmark
-  // are not too distance from the current observations
-  vector<LandmarkObs> previous_observations;
+    const auto sense_x = best->x + cos(best->theta) * closest_obs->x - sin(best->theta) * closest_obs->y;
+    const auto sense_y = best->y + sin(best->theta) * closest_obs->x + cos(best->theta) * closest_obs->y;
 
-  for (size_t i; i < best->associations.size(); ++i)
-  {
-    previous_observations.push_back(LandmarkObs{best->associations[i], best->sense_x[i], best->sense_y[i]});
-  }
-
-  dataAssociation(previous_observations, transformed_observations);
-
-  // If previous and current observations are close, update Kalman Filter
-  for (auto &to: transformed_observations)
-  {
-    // If we already track a landmark from previous step and it is in the vicinity of
-    // new position, then we have a candidate to update KF
-
-    // Find previous landmark
-    const auto &it_tracked_to = std::find_if(previous_observations.begin(), previous_observations.end(),
-                                             [&to](LandmarkObs &o)
-                                             { return to.id == o.id; });
-
-    if (dist(it_tracked_to->x, it_tracked_to->y, to.x, to.y) > 2.0)
+    for (auto &assoc_id: best->associations)
     {
-      continue;
+      const auto assoc_landmark = std::find_if(map_landmarks.landmark_list.begin(), map_landmarks.landmark_list.end(),
+                                               [&assoc_id](const Map::single_landmark_s &a)
+                                               { return a.id_i == assoc_id; });
+
+      const auto current_dist = dist(assoc_landmark->x_f, assoc_landmark->y_f, sense_x, sense_y);
+      if (current_dist < min_dist)
+      {
+        min_dist = current_dist;
+        clossest_landmark = *assoc_landmark;
+      }
     }
+
+    // Estimate position
+    auto est_x = clossest_landmark.x_f - closest_obs->x;
+    auto est_y = clossest_landmark.y_f - closest_obs->y;
 
     // Update KF with this measurement
     VectorXd z(2);
-    z << to.x, to.y;
-    kf.Update(z);
+    z << est_x, est_y;
+//    kf.Update(z);
+
+    std::cout << "KF; x: " << kf.x_[0] << ", y: " << kf.x_[1] << std::endl;
+    std::cout << "Best; x: " << best->x << ", y: " << best->y << std::endl;
+
+    // Replace raw with filtered observation within robot range
+//    for (const auto &l: map_landmarks.landmark_list)
+//    {
+//      if (dist(kf.x_[0], kf.x_[1], l.x_f, l.y_f) <= sensor_range)
+//      {
+//        filtered_observations.push_back(LandmarkObs{0, l.x_f - kf.x_[0], l.y_f - kf.x_[1]});
+//      }
+//    }
+  }
+//  else
+  {
+    filtered_observations = observations;
   }
 
   for (Particle &p: particles)
@@ -287,7 +305,7 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 
     // Transform each landmark observation coordinates from the viewpoint of the particle, to the
     // map coordinate system.
-    for (const auto &o: observations)
+    for (const auto &o: filtered_observations)
     {
       const auto sense_x = p.x + cos(p.theta) * o.x - sin(p.theta) * o.y;
       const auto sense_y = p.y + sin(p.theta) * o.x + cos(p.theta) * o.y;
@@ -323,13 +341,14 @@ void ParticleFilter::resample()
    */
 
   vector<double> weights(particles.size());
-  std::transform(particles.begin(), particles.end(), weights.begin(), [](Particle &p){ return p.weight;});
-  std::discrete_distribution<>  w_dist(weights.begin(), weights.end());
+  std::transform(particles.begin(), particles.end(), weights.begin(), [](Particle &p)
+  { return p.weight; });
+  std::discrete_distribution<> w_dist(weights.begin(), weights.end());
 
   // Problem: Only a few or just one particle survives the resample process
   std::vector<Particle> new_particles;
 
-  for(size_t i = 0; i < num_particles; ++i)
+  for (size_t i = 0; i < num_particles; ++i)
   {
     new_particles.push_back(particles[w_dist(gen)]);
   }
