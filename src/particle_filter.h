@@ -45,6 +45,8 @@ class ParticleFilter {
    */
   void init(double x, double y, double theta, double std[]);
 
+  // SrKo: Why is std data the same as for the init function (x, y and yaw)
+  // when measured values here are velocity and yaw_rate?
   /**
    * prediction Predicts the state for the next time step
    *   using the process model.
@@ -63,7 +65,7 @@ class ParticleFilter {
    * @param predicted Vector of predicted landmark observations
    * @param observations Vector of landmark observations
    */
-  void dataAssociation(std::vector<LandmarkObs> predicted, 
+  void dataAssociation(std::vector<LandmarkObs> &predicted,
                        std::vector<LandmarkObs>& observations);
   
   /**
